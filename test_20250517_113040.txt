@@ -1,0 +1,13 @@
+Started logger
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
+Raw = 23.87C, Corrected = 24.10C
