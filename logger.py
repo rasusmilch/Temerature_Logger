@@ -7,12 +7,16 @@ import sys
 import re
 from datetime import datetime
 
-# Globals for cleanup
+# === Configuration ===
+LOG_BUFFER_LIMIT = 360  # Save every 360 lines (at one per second, that's 5 minutes.)
+
+# === Globals for cleanup ===
 ser = None
 txt_file = None
 csv_file = None
 csv_writer = None
 start_time = None  # Time when the first valid line is logged
+log_buffer = []  # In-memory buffer for CSV rows
 
 def generate_timestamped_filenames(base_name):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -36,10 +40,9 @@ def open_output_files(base_name):
     print(f"Logging to {txt_filename} and {csv_filename}")
     return txt_filename, csv_filename
 
-def parse_and_log_line(line):
-    global start_time
+def parse_and_buffer_line(line):
+    global start_time, log_buffer
     txt_file.write(line + "\n")
-    txt_file.flush()
 
     match = re.search(r"Raw\s*=\s*([-+]?\d*\.\d+|\d+)C,\s*Corrected\s*=\s*([-+]?\d*\.\d+|\d+)C", line)
     if match:
@@ -51,8 +54,17 @@ def parse_and_log_line(line):
         timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
         raw_temp = float(match.group(1))
         corrected_temp = float(match.group(2))
-        csv_writer.writerow([timestamp_str, int(round(elapsed)), raw_temp, corrected_temp])
+        log_buffer.append([timestamp_str, round(elapsed, 2), raw_temp, corrected_temp])
+
+        if len(log_buffer) >= LOG_BUFFER_LIMIT:
+            flush_csv_buffer()
+
+def flush_csv_buffer():
+    global log_buffer
+    if log_buffer:
+        csv_writer.writerows(log_buffer)
         csv_file.flush()
+        log_buffer.clear()
 
 def handle_signal(sig, frame):
     print("\nReceived Ctrl+C, sending stopLogger and exiting...")
@@ -63,6 +75,7 @@ def handle_signal(sig, frame):
     except Exception as e:
         print(f"Error sending stopLogger: {e}")
     finally:
+        flush_csv_buffer()
         close_all()
         sys.exit(0)
 
@@ -86,14 +99,17 @@ def start_logging(args):
     print("Logging started. Press Ctrl+C to stop.")
 
     while True:
-        if ser.in_waiting:
-            try:
+        try:
+            if ser.in_waiting:
                 line = ser.readline().decode(errors="ignore").strip()
                 if line:
                     print(line)
-                    parse_and_log_line(line)
-            except Exception as e:
-                print(f"Error reading/parsing line: {e}")
+                    parse_and_buffer_line(line)
+        except Exception as e:
+            print(f"Error reading/parsing line: {e}")
+            flush_csv_buffer()
+            close_all()
+            break
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Serial temperature logger")
