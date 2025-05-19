@@ -22,18 +22,42 @@
 #include "utils/Placeholder.h"
 #include "eewl.h"
 #include "StaticSerialCommands.h"
+#include <MD_MAX72xx.h>
+#include <SPI.h>
+
+
+#define OW_PIN    9
+
+#define CLK_PIN   13  // or SCK
+#define DATA_PIN  11  // or MOSI
+#define CS_PIN    10  // or SS
 
 #define VERSION_MAJOR 0
 #define VERSION_MINOR 1
 #define VERSION_PATCH 0
 
-#define OW_PIN         13
+
 
 const char MSG_VER[] PROGMEM = "v";
 const char firmwarePrefix[] PROGMEM = "FIRMWARE=";
 
 // if default buffer size (64) is too small pass a buffer through constructor
 char buffer[64];
+
+// Define the number of devices we have in the chain and the hardware interface
+// NOTE: These pin numbers will probably not work with your hardware and may
+// need to be adapted
+#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
+#define MAX_DEVICES 4
+
+// SPI hardware interface
+MD_MAX72XX mx = MD_MAX72XX(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
+
+// Text parameters
+#define CHAR_SPACING  1 // pixels between characters
+
+#define DISP_MSG_SIZE 16
+char disp_msg_buffer[DISP_MSG_SIZE];
 
 /*
  * If defined: only one sensor device is allowed to be connected to the bus.
@@ -84,6 +108,175 @@ struct loggerStruct {
 
 // Global timer instance
 loggerStruct logger;
+
+void printText(uint8_t modStart, uint8_t modEnd, char *pMsg)
+// Print the text string to the LED matrix modules specified.
+// Message area is padded with blank columns after printing.
+{
+  uint8_t state = 0;
+  uint8_t curLen;
+  uint16_t showLen;
+  uint8_t cBuf[8];
+  int16_t col = ((modEnd + 1) * COL_SIZE) - 1;
+
+  mx.control(modStart, modEnd, MD_MAX72XX::UPDATE, MD_MAX72XX::OFF);
+
+  do // finite state machine to print the characters in the space available
+  {
+    switch (state) {
+    case 0: // Load the next character from the font table
+      // if we reached end of message, reset the message pointer
+      if (*pMsg == '\0') {
+        showLen = col - (modEnd * COL_SIZE); // padding characters
+        state = 2;
+        break;
+      }
+
+      // retrieve the next character form the font file
+      showLen = mx.getChar(*pMsg++, sizeof(cBuf) / sizeof(cBuf[0]), cBuf);
+      curLen = 0;
+      state++;
+      // !! deliberately fall through to next state to start displaying
+
+    case 1: // display the next part of the character
+      mx.setColumn(col--, cBuf[curLen++]);
+
+      // done with font character, now display the space between chars
+      if (curLen == showLen) {
+        showLen = CHAR_SPACING;
+        state = 2;
+      }
+      break;
+
+    case 2: // initialize state for displaying empty columns
+      curLen = 0;
+      state++;
+      // fall through
+
+    case 3: // display inter-character spacing or end of message padding (blank
+            // columns)
+      mx.setColumn(col--, 0);
+      curLen++;
+      if (curLen == showLen)
+        state = 0;
+      break;
+
+    default:
+      col = -1; // this definitely ends the do loop
+    }
+  } while (col >= (modStart * COL_SIZE));
+
+  mx.control(modStart, modEnd, MD_MAX72XX::UPDATE, MD_MAX72XX::ON);
+}
+
+/**
+ * @brief Converts a floating-point number to a string manually.
+ * @param str Buffer to store the resulting string.
+ * @param value Floating-point number to convert.
+ * @param precision Number of decimal places.
+ * @param maxLen Maximum length of the buffer.
+ * @return Number of characters written (excluding the null terminator).
+ */
+size_t floatToStr(char *str, float value, int precision, size_t maxLen) {
+  if (maxLen == 0)
+    return 0; // Early exit if no space is provided
+
+  char *start = str; // Remember the start of the buffer for length calculation
+  char *end = str + maxLen - 1; // Calculate the end pointer of the buffer
+
+  // Handle negative values
+  if (value < 0) {
+    if (str < end) {
+      *str++ = '-';
+    }
+    value = -value;
+  }
+
+  long intPart = static_cast<long>(value); // Extract integer part
+  float fractional = value - intPart;      // Extract fractional part
+
+  // Convert integer part manually
+  char *intEnd = str; // Pointer to start of the integer part
+  do {
+    if (intEnd < end) {
+      *intEnd++ = '0' + intPart % 10; // Get last digit
+    }
+    intPart /= 10; // Remove last digit
+  } while (intPart > 0 && intEnd < end);
+
+  // Reverse the integer part
+  for (char *p = str, *q = intEnd - 1; p < q; ++p, --q) {
+    char temp = *p;
+    *p = *q;
+    *q = temp;
+  }
+
+  str = intEnd; // Adjust str to point right after the last digit of the
+                // integer part
+
+  // Process fractional part if precision is greater than 0
+  if (precision > 0 && str < end) {
+    *str++ = '.'; // Add decimal point
+    while (precision-- > 0 && str < end) {
+      fractional *= 10;
+      int digit = static_cast<int>(fractional);
+      *str++ = '0' + digit; // Convert to ASCII and append
+      fractional -= digit;  // Remove the integer part
+    }
+  }
+  if (str < end + 1) {
+    *str = '\0'; // Null-terminate the string
+  }
+
+  // Calculate the length of the string excluding the null terminator
+  return str - start;
+}
+
+/**
+ * @brief Converts an int32_t to a string and stores it in a buffer.
+ * @param value Integer number to convert.
+ * @param buffer Buffer to store the resulting string.
+ * @param bufferMaxLen Maximum length of the buffer.
+ * @return Length of the resulting string, or -1 if the buffer is too small.
+ */
+int int32ToStr(int32_t value, char *buffer, size_t bufferMaxLen) {
+  char temp[12]; // Temporary buffer for reversed digits
+  char *p = temp;
+  bool isNegative = false;
+  size_t len = 0;
+
+  if (value < 0) {
+    isNegative = true;
+    value = -value;
+  }
+
+  // Extract digits in reverse order
+  do {
+    if (len >= sizeof(temp) - 1)
+      return -1; // Check temp buffer overflow
+    *p++ = (value % 10) + '0';
+    value /= 10;
+    len++;
+  } while (value > 0);
+
+  if (isNegative) {
+    if (len >= sizeof(temp) - 1)
+      return -1; // Check temp buffer overflow
+    *p++ = '-';
+    len++;
+  }
+
+  if (len >= bufferMaxLen)
+    return -1; // Check final buffer overflow
+
+  // Reverse the digits into the buffer
+  for (size_t i = 0; i < len; i++) {
+    buffer[i] = temp[len - i - 1];
+  }
+  buffer[len] = '\0'; // Null-terminate the string
+
+  return len; // Return the length of the resulting string
+}
 
 /**
  * @brief Copies a string from program memory to a buffer.
@@ -471,6 +664,7 @@ float stationToSeaLevelPressure(float stationPressure_inHg, float elevation_m) {
 void updateLogger() {
     float rawTemp;
     float correctedTemp;
+    char chars;
 
     rawTemp = getRawTemp();
 
@@ -481,6 +675,17 @@ void updateLogger() {
     Serial.print(F("C, Corrected = "));
     Serial.print(correctedTemp);
     Serial.println(F("C"));
+
+    chars = floatToStr(buffer, correctedTemp, 1, sizeof(buffer));
+
+    if (chars < sizeof(buffer) + 2) {
+        buffer[chars] = 'C';
+        chars++;
+        buffer[chars] = '\0';
+    }
+
+    printText(0, MAX_DEVICES - 1, buffer);
+    // Serial.println(buffer);
 }
 
 bool loggerUpdate() {
@@ -716,6 +921,15 @@ void setup()
     DSTherm drv(ow);
 
     Serial.begin(115200);
+
+    mx.begin();
+
+    if (createFirmwareString(MSG_VER, buffer, sizeof(buffer))) {
+        Serial.println(buffer);
+        printText(0, MAX_DEVICES - 1, buffer);
+    } else {
+        // Handle error: buffer too small
+    }
 
     // Initialize EEPROM wear leveling
     eewl.begin();
