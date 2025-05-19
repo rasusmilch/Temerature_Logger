@@ -5,10 +5,11 @@ import csv
 import signal
 import sys
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # === Configuration ===
-LOG_BUFFER_LIMIT = 360  # Save every 360 lines (at one per second, that's 5 minutes.)
+LOG_BUFFER_LIMIT = 600  # Max number of lines before flushing
+LOG_FLUSH_INTERVAL_MINUTES = 10  # Max time before flushing, in minutes
 
 # === Globals for cleanup ===
 ser = None
@@ -17,6 +18,7 @@ csv_file = None
 csv_writer = None
 start_time = None  # Time when the first valid line is logged
 log_buffer = []  # In-memory buffer for CSV rows
+last_flush_time = datetime.now()
 
 def generate_timestamped_filenames(base_name):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -41,7 +43,7 @@ def open_output_files(base_name):
     return txt_filename, csv_filename
 
 def parse_and_buffer_line(line):
-    global start_time, log_buffer
+    global start_time, log_buffer, last_flush_time
     txt_file.write(line + "\n")
 
     match = re.search(r"Raw\s*=\s*([-+]?\d*\.\d+|\d+)C,\s*Corrected\s*=\s*([-+]?\d*\.\d+|\d+)C", line)
@@ -56,15 +58,19 @@ def parse_and_buffer_line(line):
         corrected_temp = float(match.group(2))
         log_buffer.append([timestamp_str, round(elapsed, 2), raw_temp, corrected_temp])
 
-        if len(log_buffer) >= LOG_BUFFER_LIMIT:
+        flush_due_to_lines = len(log_buffer) >= LOG_BUFFER_LIMIT
+        flush_due_to_time = (now - last_flush_time) >= timedelta(minutes=LOG_FLUSH_INTERVAL_MINUTES)
+
+        if flush_due_to_lines or flush_due_to_time:
             flush_csv_buffer()
 
 def flush_csv_buffer():
-    global log_buffer
+    global log_buffer, last_flush_time
     if log_buffer:
         csv_writer.writerows(log_buffer)
         csv_file.flush()
         log_buffer.clear()
+        last_flush_time = datetime.now()
 
 def handle_signal(sig, frame):
     print("\nReceived Ctrl+C, sending stopLogger and exiting...")
@@ -89,9 +95,10 @@ def close_all():
         ser.close()
 
 def start_logging(args):
-    global ser
+    global ser, last_flush_time
     ser = open_serial_port(args.port, args.baudrate)
     open_output_files(args.output)
+    last_flush_time = datetime.now()
 
     signal.signal(signal.SIGINT, handle_signal)
 
